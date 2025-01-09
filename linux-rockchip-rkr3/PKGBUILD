@@ -17,33 +17,80 @@ optdepends=('mali-G610-firmware-rkr4: Mali G610 firmware for Rockchip RK3588(S)'
 makedepends=('xmlto' 'docbook-xsl' 'kmod' 'inetutils' 'bc' 'git' 'uboot-tools' 'vboot-utils' 'dtc')
 options=('!strip' 'ccache')
 conflicts=('linux-rockchip-rk3588' 'linux-rockchip' 'linux-rockchip-rkr6' 'linux-rockchip-rkr1')
-source=(git+https://github.com/BredOS/linux-rockchip.git#branch=rk6.1-rkr3
-        'linux.preset'
-        'config')
-md5sums=('SKIP'
-         'SKIP'
-         'SKIP')
+source=(
+  'linux.preset'
+  'config')
+md5sums=(
+  'SKIP'
+  'SKIP')
+
 prepare() {
+  echo "doing prepare for building kernel with make!"
+  echo "using config: ${srcdir}/config"
   cd linux-rockchip
 
+  # copy the orange pi 5 config to .config for building
   cp ${srcdir}/config .config
+  echo "copied config: ${srcdir}/config to .config"
+}
+
+# make prepare will generate some files like headers, but not compile
+prepareMake() {
+  # create empty files for .scmversion and localversion
+  echo >.scmversion
+  echo >localversion
+
+  # modify makefile to add -rkr3 and other compiler flags
+  echo "doing make olddefconfig prepare, should only run once"
+  # add -Wno-array-compare -Wno-dangling-pointer -Wno-stringop-overread -Wno-misleading-indentation -Wno-address to makefile
+  sed -i 's|-std=gnu89|-std=gnu89 -Wno-array-compare -Wno-dangling-pointer -Wno-stringop-overread -Wno-misleading-indentation -Wno-address -Wno-unused-function|g' Makefile
+
+  # don't run below command for 2nd time
+  make olddefconfig prepare
+
+  # above command Update current config with .config provided by user
+  # above command is not working, error:
+  #   "6.1.75-rkr3 -rkr3 -rkr3 -rkr3 -rkr3 -rkr3 -rkr3 -rkr3 -rkr3 -rkr3" exceeds 64 characters
+  # make[1]: *** [Makefile:1349: include/generated/utsrelease.h] Error 1
+
+  # edit makefile to add -rkr3 to localversion
+
+  # below command will add -rkr3 to EXTRAVERSION line multiple times!
+
+  # sed -i 's|EXTRAVERSION =|EXTRAVERSION = -rkr3|g' Makefile
+  sed -i 's|EXTRAVERSION =|EXTRAVERSION = -rkr3|g' Makefile
+  echo "doing make kernelrelease"
+  make -s kernelrelease >version
+  unset LDFLAGS
 }
 
 build() {
   cd linux-rockchip
 
-  echo > .scmversion
-  echo > localversion
-  # add -Wno-array-compare -Wno-dangling-pointer -Wno-stringop-overread -Wno-misleading-indentation -Wno-address to makefile
-  sed -i 's|-std=gnu89|-std=gnu89 -Wno-array-compare -Wno-dangling-pointer -Wno-stringop-overread -Wno-misleading-indentation -Wno-address -Wno-unused-function|g' Makefile
-  make olddefconfig prepare
-  # edit makefile to add -rkr3 to localversion
-  sed -i 's|EXTRAVERSION =|EXTRAVERSION = -rkr3|g' Makefile
-  make -s kernelrelease > version
-  unset LDFLAGS
+  echo "start building kernel! "
+  prepareMake
 
-  make ${MAKEFLAGS} Image modules
-  make ${MAKEFLAGS} DTC_FLAGS="-@" dtbs
+  echo "make command: make ${MAKEFLAGS}"
+  # MAKEFLAGS is empty!
+
+  # make ${MAKEFLAGS} modules
+  # make ${MAKEFLAGS} bzImage modules
+  # make bzImage
+  # make ${MAKEFLAGS} Image modules
+  # echo "makeflags: ${MAKEFLAGS}"
+  # make ${MAKEFLAGS} DTC_FLAGS="-@" dtbs
+}
+
+myMake() {
+  echo "doing make kernel! "
+  # copy the orange pi 5 config to .config for building
+  cp ${srcdir}/config .config
+  echo "copied config: ${srcdir}/config to .config"
+  # below combines orange pi 5 config with the default config
+  # so I don't need to enter prompts
+  make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig prepare
+  make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j4
+  # make -j$(nproc) LOCALVERSION="-rkr3" ${MAKEFLAGS}
 }
 
 _package() {
@@ -54,14 +101,22 @@ _package() {
   backup=("etc/mkinitcpio.d/${_kernel}.preset")
 
   cd linux-rockchip
+  echo "start package kernel! "
 
   local _version="$(<version)"
+  echo "start install dtbs, modules, kernel, pwd: $(pwd)"
+  echo "pkgdir: $pkgdir"
 
+  # target not found: dtbs_install modules_install
   # install dtbs
-  make INSTALL_DTBS_PATH="${pkgdir}/boot/dtbs/" dtbs_install
+  # make INSTALL_DTBS_PATH="${pkgdir}/boot/dtbs/" dtbs_install
+  make INSTALL_DTBS_PATH="${pkgdir}/boot/dtbs/" dtbs
+  echo "installed dtbs to: $pkgdir/boot/dtbs/"
 
   # install modules
-  make INSTALL_MOD_PATH="$pkgdir/usr" INSTALL_MOD_STRIP=1 modules_install
+  # make INSTALL_MOD_PATH="$pkgdir/usr" INSTALL_MOD_STRIP=1 modules_install
+  make INSTALL_MOD_PATH="$pkgdir/usr" INSTALL_MOD_STRIP=1 modules
+  echo "installed modules to: $pkgdir/usr/"
 
   # copy kernel
   install -Dm644 arch/arm64/boot/Image "$pkgdir/usr/lib/modules/$_version/vmlinuz"
@@ -90,6 +145,7 @@ _package-headers() {
   provides=("linux-headers=${pkgver}" "linux-rockchip-rkr3-headers=${pkgver}")
 
   cd linux-rockchip
+  echo "start package kernel headers! "
   local _version="$(<version)"
   local builddir="$pkgdir/usr/lib/modules/$_version/build"
 
@@ -147,14 +203,14 @@ _package-headers() {
   local file
   while read -rd '' file; do
     case "$(file -bi "$file")" in
-      application/x-sharedlib\;*)      # Libraries (.so)
-        strip -v $STRIP_SHARED "$file" ;;
-      application/x-archive\;*)        # Libraries (.a)
-        strip -v $STRIP_STATIC "$file" ;;
-      application/x-executable\;*)     # Binaries
-        strip -v $STRIP_BINARIES "$file" ;;
-      application/x-pie-executable\;*) # Relocatable binaries
-        strip -v $STRIP_SHARED "$file" ;;
+    application/x-sharedlib\;*) # Libraries (.so)
+      strip -v $STRIP_SHARED "$file" ;;
+    application/x-archive\;*) # Libraries (.a)
+      strip -v $STRIP_STATIC "$file" ;;
+    application/x-executable\;*) # Binaries
+      strip -v $STRIP_BINARIES "$file" ;;
+    application/x-pie-executable\;*) # Relocatable binaries
+      strip -v $STRIP_SHARED "$file" ;;
     esac
   done < <(find "$builddir" -type f -perm -u+x ! -name -print0)
 
